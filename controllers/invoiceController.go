@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm/clause"
 )
 
 func CreateInvoice(c *fiber.Ctx) error {
@@ -174,4 +175,108 @@ func extractInvoiceItems(data map[string]string) ([]models.InvoiceItem, float64,
 	}
 
 	return items, subtotal, taxTotal, nil
+}
+
+func GetInvoices(c *fiber.Ctx) error {
+	var invoices []models.Invoice
+	//var customer models.Customer
+	schema := c.Locals("schema").(string)
+	if schema == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Could not retrieve tenant schema",
+		})
+	}
+
+	tenantDB, err := database.GetTenantDB(schema)
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Internal Error",
+			"error":   err.Error(),
+		})
+	}
+
+	tx := tenantDB.Begin()
+
+	tx.Model(&models.Invoice{}).Preload("Customer").Find(&invoices)
+	tx.Commit()
+	return c.JSON(fiber.Map{
+		"invoices": invoices,
+		"message":  "success",
+	})
+}
+
+func GetInvoice(c *fiber.Ctx) error {
+	var invoice models.Invoice
+
+	id, err := c.ParamsInt("id")
+
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Invoice not found",
+			"error":   err.Error(),
+		})
+	}
+
+	schema := c.Locals("schema").(string)
+	if schema == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Could not retrieve tenant schema",
+		})
+	}
+
+	tenantDB, err := database.GetTenantDB(schema)
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Internal Error",
+			"error":   err.Error(),
+		})
+	}
+
+	tx := tenantDB.Begin()
+	tx.Model(&models.Invoice{}).Preload(clause.Associations).Find(&invoice, id)
+	tx.Commit()
+	return c.JSON(fiber.Map{
+		"invoice": invoice,
+		"message": "success",
+	})
+
+}
+
+func PublishInvoice(c *fiber.Ctx) error {
+	var data map[string]string
+	if err := c.BodyParser(&data); err != nil {
+		return c.Status(400).JSON(fiber.Map{"message": "Invalid input"})
+	}
+
+	schema := c.Locals("schema").(string)
+	if schema == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Could not retrieve tenant schema",
+		})
+	}
+
+	invoice := models.Invoice{
+		InvoiceNumber: data["invoice_number"],
+	}
+
+	tenantDB, _ := database.GetTenantDB(schema)
+
+	tx := tenantDB.Begin()
+
+	if err := tx.Model(&invoice).Updates(&invoice).Error; err != nil {
+		tx.Rollback()
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Could not publish invoice",
+			"error":   err.Error(),
+		})
+	}
+	tx.Commit()
+
+	return c.JSON(fiber.Map{
+		"message": "success",
+	})
 }

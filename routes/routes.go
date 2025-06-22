@@ -20,6 +20,7 @@ func Setup(app *fiber.App) {
 	authenticated.Post("customer", controllers.CreateCustomer)
 	authenticated.Put("customer", controllers.UpdateCustomer)
 	authenticated.Get("customers", controllers.GetCustomers)
+	authenticated.Get("customers/:id", controllers.GetCustomer)
 
 	//Article Routes
 	authenticated.Post("article", controllers.CreateArticles)
@@ -28,4 +29,7 @@ func Setup(app *fiber.App) {
 	//Invoice Routes
 	authenticated.Post("invoice", controllers.CreateInvoice)
 	authenticated.Put("inovice", controllers.UpdateInvoice)
+	authenticated.Get("invoices", controllers.GetInvoices)
+	authenticated.Get("invoices/:id", controllers.GetInvoice)
+	authenticated.Put("invoices/publish/:id", controllers.PublishInvoice)
 }

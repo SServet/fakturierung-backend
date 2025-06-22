@@ -63,6 +63,45 @@ func CreateCustomer(c *fiber.Ctx) error {
 	return c.JSON(customer)
 }
 
+func GetCustomer(c *fiber.Ctx) error {
+	var customer models.Customer
+
+	id, err := c.ParamsInt("id")
+
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Customer not found",
+			"error":   err.Error(),
+		})
+	}
+
+	schema := c.Locals("schema").(string)
+	if schema == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Could not retrieve tenant schema",
+		})
+	}
+
+	tenantDB, err := database.GetTenantDB(schema)
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Internal Error",
+			"error":   err.Error(),
+		})
+	}
+
+	tx := tenantDB.Begin()
+	tx.Model(&models.Customer{}).Find(&customer, id)
+	tx.Commit()
+	return c.JSON(fiber.Map{
+		"customer": customer,
+		"message":  "success",
+	})
+
+}
+
 func UpdateCustomer(c *fiber.Ctx) error {
 	var data map[string]string
 

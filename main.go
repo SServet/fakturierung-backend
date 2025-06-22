@@ -17,7 +17,7 @@ func main() {
 
 	// 1) CORS: allow only your React origin and the headers you'll send
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://localhost:3000",
+		AllowOrigins:     "http://192.168.0.180:3000",
 		AllowCredentials: false, // no cookies
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Tenant-Schema",
 	}))
