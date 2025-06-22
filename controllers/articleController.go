@@ -144,3 +144,32 @@ func UpdateArticle(c *fiber.Ctx) error {
 	tx.Commit()
 	return c.JSON(article)
 }
+
+func GetArticles(c *fiber.Ctx) error {
+	var articles []models.Article
+
+	schema := c.Locals("schema").(string)
+	if schema == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"message": "Could not retrieve tenant schema",
+		})
+	}
+
+	tenantDB, err := database.GetTenantDB(schema)
+	if err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Internal Error",
+			"error":   err.Error(),
+		})
+	}
+
+	tx := tenantDB.Begin()
+
+	tx.Model(&models.Article{}).Find(&articles)
+	tx.Commit()
+	return c.JSON(fiber.Map{
+		"articles": articles,
+		"message":  "success",
+	})
+}

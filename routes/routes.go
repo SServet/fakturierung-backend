@@ -25,6 +25,7 @@ func Setup(app *fiber.App) {
 	//Article Routes
 	authenticated.Post("article", controllers.CreateArticles)
 	authenticated.Put("article", controllers.UpdateArticle)
+	authenticated.Get("articles", controllers.GetArticles)
 
 	//Invoice Routes
 	authenticated.Post("invoice", controllers.CreateInvoice)
