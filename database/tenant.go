@@ -3,38 +3,42 @@ package database
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
 
-// DB is your global *gorm.DB initialized at startup (see database/init or main.go).
+// DB is initialized in your existing Connect() (keep your current implementation).
 
-// GetTenantDB returns a tenant-scoped *gorm.DB based on auth middleware locals.
-// It verifies that the user belongs to the claimed schema and sets search_path.
+// GetTenantDB returns a *gorm.DB bound to the request's tenant.
+// Prefer an existing per-request TX (middlewares.TenantTx), else fall back to a session
+// where we set the search_path for the connection.
 func GetTenantDB(c *fiber.Ctx) (*gorm.DB, error) {
+	// If a per-request transaction exists, use it.
+	if v := c.Locals("tx"); v != nil {
+		if tx, ok := v.(*gorm.DB); ok && tx != nil {
+			return tx, nil
+		}
+	}
+
+	// Otherwise, prepare a tenant-scoped session.
 	schema, _ := c.Locals("schema").(string)
-	userID, _ := c.Locals("userID").(string)
-	if schema == "" || userID == "" {
-		return nil, errors.New("missing auth context")
+	if strings.TrimSpace(schema) == "" {
+		return nil, errors.New("tenant schema missing")
+	}
+	if DB == nil {
+		return nil, errors.New("database not initialized")
 	}
 
-	// Verify the user ↔ schema mapping in the public.users table.
-	var n int64
-	if err := DB.
-		Table(`public.users`).
-		Where(`id = ? AND schema_name = ?`, userID, schema).
-		Count(&n).Error; err != nil {
-		return nil, fmt.Errorf("user check failed: %w", err)
+	// Use a dedicated session; pin search_path for this connection.
+	sess := DB.Session(&gorm.Session{})
+	// Try SET LOCAL (no-op outside TX) and then hard SET as fallback.
+	if err := sess.Exec(`SET LOCAL search_path = "` + schema + `", public`).Error; err != nil {
+		// Ignore error; SET LOCAL can be invalid outside TX. Use SET instead.
 	}
-	if n == 0 {
-		return nil, errors.New("schema does not belong to user")
-	}
-
-	// Set the search_path for this session to the tenant schema (then public).
-	tenant := DB.Session(&gorm.Session{})
-	if err := tenant.Exec(`SET search_path = "` + schema + `", public`).Error; err != nil {
+	if err := sess.Exec(`SET search_path = "` + schema + `", public`).Error; err != nil {
 		return nil, fmt.Errorf("set search_path failed: %w", err)
 	}
-	return tenant, nil
+	return sess, nil
 }

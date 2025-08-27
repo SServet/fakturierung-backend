@@ -1,109 +1,118 @@
 package controllers
 
 import (
+	"errors"
+	"strings"
+
 	"fakturierung-backend/database"
+	"fakturierung-backend/middlewares"
 	"fakturierung-backend/models"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
-func CreateSupplier(c *fiber.Ctx) error {
-	var data map[string]string
+type SupplierCreateDTO struct {
+	CompanyName  string `json:"company_name" validate:"required,min=1"`
+	Address      string `json:"address" validate:"required,min=1"`
+	City         string `json:"city" validate:"required,min=1"`
+	Country      string `json:"country" validate:"required,min=1"`
+	Zip          string `json:"zip" validate:"required,min=1"`
+	Homepage     string `json:"homepage" validate:"omitempty,url"`
+	UID          string `json:"uid" validate:"omitempty"`
+	Email        string `json:"email" validate:"required,email"`
+	PhoneNumber  string `json:"phone_number" validate:"required"`
+	MobileNumber string `json:"mobile_number" validate:"required"`
+}
 
-	if err := c.BodyParser(&data); err != nil {
+type SupplierUpdateDTO struct {
+	Address      string `json:"address" validate:"omitempty"`
+	City         string `json:"city" validate:"omitempty"`
+	Country      string `json:"country" validate:"omitempty"`
+	Zip          string `json:"zip" validate:"omitempty"`
+	Homepage     string `json:"homepage" validate:"omitempty,url"`
+	UID          string `json:"uid" validate:"omitempty"`
+	Email        string `json:"email" validate:"omitempty,email"`
+	PhoneNumber  string `json:"phone_number" validate:"omitempty"`
+	MobileNumber string `json:"mobile_number" validate:"omitempty"`
+}
+
+// POST /api/supplier
+func CreateSupplier(c *fiber.Ctx) error {
+	var in SupplierCreateDTO
+	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
 
-	schema := c.Locals("schema").(string)
-	if schema == "" {
-		return c.Status(400).JSON(fiber.Map{
-			"message": "Could not retrieve tenant schema",
-		})
-	}
-
-	tenantDB, err := database.GetTenantDB(schema)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		c.Status(fiber.StatusBadRequest)
-		return c.JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
-
-	tx := tenantDB.Begin()
 
 	supplier := models.Supplier{
-		PhoneNumber:  data["phone_number"],
-		MobileNumber: data["mobile_number"],
-		CompanyName:  data["company_name"],
-		Address:      data["address"],
-		City:         data["city"],
-		Country:      data["country"],
-		Zip:          data["zip"],
-		Homepage:     data["homepage"],
-		UID:          data["uid"],
-		Email:        data["email"],
+		CompanyName:  strings.TrimSpace(in.CompanyName),
+		Address:      strings.TrimSpace(in.Address),
+		City:         strings.TrimSpace(in.City),
+		Country:      strings.TrimSpace(in.Country),
+		Zip:          strings.TrimSpace(in.Zip),
+		Homepage:     strings.TrimSpace(in.Homepage),
+		UID:          strings.TrimSpace(in.UID),
+		Email:        strings.TrimSpace(in.Email),
+		PhoneNumber:  strings.TrimSpace(in.PhoneNumber),
+		MobileNumber: strings.TrimSpace(in.MobileNumber),
 	}
 
-	if err := tx.Create(&supplier).Error; err != nil {
-		tx.Rollback()
-		c.Status(fiber.StatusBadRequest)
-		return c.JSON(fiber.Map{
-			"message": "Could not create supplier",
-			"error":   err.Error(),
-		})
+	if err := db.Create(&supplier).Error; err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "could not create supplier")
 	}
-
-	tx.Commit()
-	tenantDB.First(&supplier)
 	return c.JSON(supplier)
 }
 
+// PUT /api/supplier/:id
 func UpdateSupplier(c *fiber.Ctx) error {
-	var data map[string]string
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing supplier id in path")
+	}
 
-	if err := c.BodyParser(&data); err != nil {
+	var in SupplierUpdateDTO
+	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
 
-	schema := c.Locals("schema").(string)
-	if schema == "" {
-		return c.Status(400).JSON(fiber.Map{
-			"message": "Could not retrieve tenant schema",
-		})
-	}
-
-	tenantDB, err := database.GetTenantDB(schema)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		c.Status(fiber.StatusBadRequest)
-		return c.JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
 
-	tx := tenantDB.Begin()
-
-	supplier := models.Supplier{
-		PhoneNumber:  data["phone_number"],
-		MobileNumber: data["mobile_number"],
-		Address:      data["address"],
-		City:         data["city"],
-		Country:      data["country"],
-		Zip:          data["zip"],
-		Homepage:     data["homepage"],
-		UID:          data["uid"],
-		Email:        data["email"],
+	// Ensure exists
+	var existing models.Supplier
+	if err := db.First(&existing, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "supplier not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	if err := tx.Model(&supplier).Where("company_name = ?", data["company_name"]).Updates(&supplier).Error; err != nil {
-		tx.Rollback()
-		c.Status(fiber.StatusBadRequest)
-		return c.JSON(fiber.Map{
-			"message": "Could not update company",
-			"error":   err.Error(),
-		})
+	updates := map[string]interface{}{
+		"address":       strings.TrimSpace(in.Address),
+		"city":          strings.TrimSpace(in.City),
+		"country":       strings.TrimSpace(in.Country),
+		"zip":           strings.TrimSpace(in.Zip),
+		"homepage":      strings.TrimSpace(in.Homepage),
+		"uid":           strings.TrimSpace(in.UID),
+		"email":         strings.TrimSpace(in.Email),
+		"phone_number":  strings.TrimSpace(in.PhoneNumber),
+		"mobile_number": strings.TrimSpace(in.MobileNumber),
 	}
-	tx.Commit()
-	return c.JSON(supplier)
+
+	if err := db.Model(&models.Supplier{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "could not update supplier")
+	}
+
+	var out models.Supplier
+	if err := db.First(&out, "id = ?", id).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to reload supplier")
+	}
+	return c.JSON(out)
 }

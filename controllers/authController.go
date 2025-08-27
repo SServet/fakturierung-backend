@@ -113,7 +113,7 @@ func Register(c *fiber.Ctx) error {
 		})
 	}
 
-	err = database.MigrateTenantSchema(c)
+	err = database.MigrateTenantSchema(schemaName)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"message": "Could not migrate tenant schema"})
 	}
@@ -190,7 +190,7 @@ func Login(c *fiber.Ctx) error {
 	}
 	c.Cookie(&cookie) */
 
-	err = database.MigrateTenantSchema(c)
+	err = database.MigrateTenantSchema(user.SchemaName)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"message": "Could not migrate tenant schema"})
 	}

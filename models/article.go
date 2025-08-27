@@ -7,10 +7,10 @@ import (
 
 type Article struct {
 	Id          string  `json:"id" gorm:"primaryKey"`
-	Name        string  `json:"name" gorm:"not null;index"` // index helps search/sort
+	Name        string  `json:"name" gorm:"not null;index"`
 	Description string  `json:"description"`
-	UnitPrice   float64 `json:"unit_price"`
-	Active      bool    `json:"active" gorm:"index"` // fixed (was json:"-")
+	UnitPrice   float64 `json:"unit_price" gorm:"type:numeric(12,2)"`
+	Active      bool    `json:"active" gorm:"index"`
 }
 
 func (article *Article) BeforeCreate(tx *gorm.DB) (err error) {

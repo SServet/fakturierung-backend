@@ -5,153 +5,147 @@ import (
 	"strings"
 
 	"fakturierung-backend/database"
+	"fakturierung-backend/middlewares"
 	"fakturierung-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
 
+type CustomerCreateDTO struct {
+	FirstName    string `json:"first_name" validate:"required,min=1"`
+	LastName     string `json:"last_name" validate:"required,min=1"`
+	Salutation   string `json:"salutation" validate:"omitempty"`
+	Title        string `json:"title" validate:"omitempty"`
+	PhoneNumber  string `json:"phone_number" validate:"omitempty"`
+	MobileNumber string `json:"mobile_number" validate:"omitempty"`
+	CompanyName  string `json:"company_name" validate:"required,min=1"`
+	Address      string `json:"address" validate:"required,min=1"`
+	City         string `json:"city" validate:"required,min=1"`
+	Country      string `json:"country" validate:"required,min=1"`
+	Zip          string `json:"zip" validate:"required,min=1"`
+	Homepage     string `json:"homepage" validate:"omitempty,url"`
+	UID          string `json:"uid" validate:"omitempty"`
+	Email        string `json:"email" validate:"required,email"`
+}
+
+type CustomerUpdateDTO struct {
+	PhoneNumber  string `json:"phone_number" validate:"omitempty"`
+	MobileNumber string `json:"mobile_number" validate:"omitempty"`
+	Address      string `json:"address" validate:"omitempty"`
+	City         string `json:"city" validate:"omitempty"`
+	Country      string `json:"country" validate:"omitempty"`
+	Zip          string `json:"zip" validate:"omitempty"`
+	Homepage     string `json:"homepage" validate:"omitempty,url"`
+	UID          string `json:"uid" validate:"omitempty"`
+	Email        string `json:"email" validate:"omitempty,email"`
+}
+
 // POST /api/customer
 func CreateCustomer(c *fiber.Ctx) error {
-	var data map[string]string
-	if err := c.BodyParser(&data); err != nil {
+	var in CustomerCreateDTO
+	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
 
-	tenantDB, err := database.GetTenantDB(c)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
-
-	tx := tenantDB.Begin()
 
 	customer := models.Customer{
-		FirstName:    data["first_name"],
-		LastName:     data["last_name"],
-		Salutation:   data["salutation"],
-		Title:        data["title"],
-		PhoneNumber:  data["phone_number"],
-		MobileNumber: data["mobile_number"],
-		CompanyName:  data["company_name"],
-		Address:      data["address"],
-		City:         data["city"],
-		Country:      data["country"],
-		Zip:          data["zip"],
-		Homepage:     data["homepage"],
-		UID:          data["uid"],
-		Email:        data["email"],
+		FirstName:    strings.TrimSpace(in.FirstName),
+		LastName:     strings.TrimSpace(in.LastName),
+		Salutation:   strings.TrimSpace(in.Salutation),
+		Title:        strings.TrimSpace(in.Title),
+		PhoneNumber:  strings.TrimSpace(in.PhoneNumber),
+		MobileNumber: strings.TrimSpace(in.MobileNumber),
+		CompanyName:  strings.TrimSpace(in.CompanyName),
+		Address:      strings.TrimSpace(in.Address),
+		City:         strings.TrimSpace(in.City),
+		Country:      strings.TrimSpace(in.Country),
+		Zip:          strings.TrimSpace(in.Zip),
+		Homepage:     strings.TrimSpace(in.Homepage),
+		UID:          strings.TrimSpace(in.UID),
+		Email:        strings.TrimSpace(in.Email),
 	}
 
-	if err := tx.Create(&customer).Error; err != nil {
-		tx.Rollback()
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Could not create company",
-			"error":   err.Error(),
-		})
+	if err := db.Create(&customer).Error; err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "could not create customer")
 	}
-
-	tx.Commit()
-	tenantDB.First(&customer)
-
 	return c.JSON(customer)
 }
 
 // GET /api/customer/:id
 func GetCustomer(c *fiber.Ctx) error {
-	id := c.Params("id")
-	if strings.TrimSpace(id) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Customer not found"})
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "customer not found")
 	}
 
-	tenantDB, err := database.GetTenantDB(c)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
 
 	var customer models.Customer
-	tx := tenantDB.Begin()
-	if err := tx.Model(&models.Customer{}).First(&customer, "id = ?", id).Error; err != nil {
-		tx.Rollback()
+	if err := db.First(&customer, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "Customer not found"})
+			return fiber.NewError(fiber.StatusNotFound, "customer not found")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "db error"})
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
-	tx.Commit()
-
 	return c.JSON(fiber.Map{
 		"customer": customer,
 		"message":  "success",
 	})
 }
 
-// PUT /api/customer/:id  (updated to use :id + WHERE)
+// PUT /api/customer/:id
 func UpdateCustomer(c *fiber.Ctx) error {
-	id := c.Params("id")
-	if strings.TrimSpace(id) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "missing customer id in path"})
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing customer id in path")
 	}
 
-	var data map[string]string
-	if err := c.BodyParser(&data); err != nil {
+	var in CustomerUpdateDTO
+	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
 
-	tenantDB, err := database.GetTenantDB(c)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
 
-	// Ensure the record exists (for clear 404)
+	// Ensure exists
 	var existing models.Customer
-	if err := tenantDB.First(&existing, "id = ?", id).Error; err != nil {
+	if err := db.First(&existing, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "customer not found"})
+			return fiber.NewError(fiber.StatusNotFound, "customer not found")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "db error"})
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
-
-	tx := tenantDB.Begin()
 
 	updates := map[string]interface{}{
-		"phone_number":  data["phone_number"],
-		"mobile_number": data["mobile_number"],
-		"address":       data["address"],
-		"city":          data["city"],
-		"country":       data["country"],
-		"zip":           data["zip"],
-		"homepage":      data["homepage"],
-		"uid":           data["uid"],
-		"email":         data["email"],
-		// company_name intentionally excluded from update key in this handler
+		"phone_number":  strings.TrimSpace(in.PhoneNumber),
+		"mobile_number": strings.TrimSpace(in.MobileNumber),
+		"address":       strings.TrimSpace(in.Address),
+		"city":          strings.TrimSpace(in.City),
+		"country":       strings.TrimSpace(in.Country),
+		"zip":           strings.TrimSpace(in.Zip),
+		"homepage":      strings.TrimSpace(in.Homepage),
+		"uid":           strings.TrimSpace(in.UID),
+		"email":         strings.TrimSpace(in.Email),
 	}
-
-	if err := tx.Model(&models.Customer{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		tx.Rollback()
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Could not update company",
-			"error":   err.Error(),
-		})
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "commit failed"})
+	if err := db.Model(&models.Customer{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "could not update customer")
 	}
 
 	var out models.Customer
-	if err := tenantDB.First(&out, "id = ?", id).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to reload customer"})
+	if err := db.First(&out, "id = ?", id).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to reload customer")
 	}
-
 	return c.JSON(out)
 }
 
@@ -159,17 +153,14 @@ func UpdateCustomer(c *fiber.Ctx) error {
 func GetCustomers(c *fiber.Ctx) error {
 	var customers []models.Customer
 
-	tenantDB, err := database.GetTenantDB(c)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
 
-	tx := tenantDB.Begin()
-	tx.Model(&models.Customer{}).Find(&customers)
-	tx.Commit()
+	if err := db.Model(&models.Customer{}).Find(&customers).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
+	}
 
 	return c.JSON(fiber.Map{
 		"customers": customers,

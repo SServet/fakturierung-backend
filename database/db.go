@@ -6,27 +6,12 @@ import (
 	"log"
 	"os"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 var DB *gorm.DB
-
-func MigrateTenantSchema(c *fiber.Ctx) error {
-	tenantDB, err := GetTenantDB(c)
-	if err != nil {
-		return err
-	}
-
-	return tenantDB.AutoMigrate(
-		&models.Supplier{}, &models.Article{}, &models.Customer{},
-		&models.Invoice{},
-		&models.InvoiceItem{},
-		&models.InvoiceVersion{}, // NEW
-		&models.Payment{})
-}
 
 func Connect() {
 	err := godotenv.Load()

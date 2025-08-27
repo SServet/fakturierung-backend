@@ -2,170 +2,150 @@ package controllers
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
 	"fakturierung-backend/database"
+	"fakturierung-backend/middlewares"
 	"fakturierung-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
 
-type ArticleInput struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	UnitPrice   string `json:"unit_price"`
-	Active      string `json:"active"`
+type ArticleDTO struct {
+	Name        string  `json:"name" validate:"required,min=1"`
+	Description string  `json:"description" validate:"omitempty"`
+	UnitPrice   float64 `json:"unit_price" validate:"required,gt=0"`
+	Active      bool    `json:"active" validate:"required"`
 }
 
-// POST /api/article  (batch create: accepts []ArticleInput)
+type ArticleUpdateDTO struct {
+	Name        string  `json:"name" validate:"required,min=1"`
+	Description string  `json:"description" validate:"omitempty"`
+	UnitPrice   float64 `json:"unit_price" validate:"required,gt=0"`
+	Active      bool    `json:"active" validate:"required"`
+}
+
+// POST /api/article  (batch create: accepts JSON array of ArticleDTO)
 func CreateArticles(c *fiber.Ctx) error {
-	var inputs []ArticleInput
+	var inputs []ArticleDTO
 	if err := c.BodyParser(&inputs); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Invalid request body",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if len(inputs) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "no articles provided")
 	}
 
-	tenantDB, err := database.GetTenantDB(c)
+	// Validate each element
+	for i := range inputs {
+		if err := middlewares.ValidateStruct(inputs[i]); err != nil {
+			return err
+		}
+	}
+
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"message": "Database error",
-			"error":   err.Error(),
+		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
+	}
+
+	articles := make([]models.Article, 0, len(inputs))
+	for _, in := range inputs {
+		articles = append(articles, models.Article{
+			Name:        strings.TrimSpace(in.Name),
+			Description: strings.TrimSpace(in.Description),
+			UnitPrice:   in.UnitPrice,
+			Active:      in.Active,
 		})
 	}
 
-	tx := tenantDB.Begin()
-	var created []models.Article
-
-	for i, input := range inputs {
-		unitPrice, err := strconv.ParseFloat(strings.TrimSpace(input.UnitPrice), 64)
-		if err != nil {
-			tx.Rollback()
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"message": fmt.Sprintf("Invalid unit price at index %d", i),
-			})
-		}
-		active, err := strconv.ParseBool(strings.TrimSpace(input.Active))
-		if err != nil {
-			tx.Rollback()
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"message": fmt.Sprintf("Invalid active value at index %d", i),
-			})
-		}
-
-		article := models.Article{
-			Name:        strings.TrimSpace(input.Name),
-			Description: strings.TrimSpace(input.Description),
-			UnitPrice:   unitPrice,
-			Active:      active,
-		}
-
-		if err := tx.Create(&article).Error; err != nil {
-			tx.Rollback()
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"message": fmt.Sprintf("Could not create article at index %d", i),
-				"error":   err.Error(),
-			})
-		}
-		created = append(created, article)
+	// Efficient bulk insert
+	if err := db.CreateInBatches(&articles, 100).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "could not create articles")
 	}
-
-	tx.Commit()
-	return c.Status(fiber.StatusCreated).JSON(created)
+	return c.Status(fiber.StatusCreated).JSON(articles)
 }
 
-// PUT /api/articles/:id  (updated to use :id + WHERE)
+// PUT /api/articles/:id
 func UpdateArticle(c *fiber.Ctx) error {
-	id := c.Params("id")
-	if strings.TrimSpace(id) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "missing article id in path"})
+	id := strings.TrimSpace(c.Params("id"))
+	if id == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing article id in path")
 	}
 
-	var data map[string]string
-	if err := c.BodyParser(&data); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid body"})
+	var in ArticleUpdateDTO
+	if err := middlewares.BindAndValidate(c, &in); err != nil {
+		return err
 	}
 
-	unitPriceStr := data["unit_price"]
-	unitPrice, err := strconv.ParseFloat(unitPriceStr, 64)
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Invalid unit price format"})
+		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
-	activeStr := data["active"]
-	active, err := strconv.ParseBool(activeStr)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Invalid active value"})
-	}
-
-	tenantDB, err := database.GetTenantDB(c)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
-	}
-
-	// Ensure the record exists (to return a clean 404)
+	// Ensure exists
 	var existing models.Article
-	if err := tenantDB.First(&existing, "id = ?", id).Error; err != nil {
+	if err := db.First(&existing, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "article not found"})
+			return fiber.NewError(fiber.StatusNotFound, "article not found")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "db error"})
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
-
-	tx := tenantDB.Begin()
 
 	updates := map[string]interface{}{
-		"name":        data["name"],
-		"description": data["description"],
-		"unit_price":  unitPrice,
-		"active":      active,
+		"name":        strings.TrimSpace(in.Name),
+		"description": strings.TrimSpace(in.Description),
+		"unit_price":  in.UnitPrice,
+		"active":      in.Active,
 	}
-
-	if err := tx.Model(&models.Article{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		tx.Rollback()
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Could not update article",
-			"error":   err.Error(),
-		})
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "commit failed"})
+	if err := db.Model(&models.Article{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "could not update article")
 	}
 
 	var out models.Article
-	if err := tenantDB.First(&out, "id = ?", id).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to reload article"})
+	if err := db.First(&out, "id = ?", id).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to reload article")
 	}
-
 	return c.JSON(out)
 }
 
-// GET /api/articles
+// GET /api/articles?q=<term>&active=true|false&limit=50&offset=0
 func GetArticles(c *fiber.Ctx) error {
 	var articles []models.Article
 
-	tenantDB, err := database.GetTenantDB(c)
+	q := strings.TrimSpace(c.Query("q"))
+	activeStr := strings.TrimSpace(c.Query("active"))
+	limit := parseIntDefault(c.Query("limit"), 50)
+	offset := parseIntDefault(c.Query("offset"), 0)
+
+	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"message": "Internal Error",
-			"error":   err.Error(),
-		})
+		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
 	}
 
-	tx := tenantDB.Begin()
-	tx.Model(&models.Article{}).Find(&articles)
-	tx.Commit()
+	query := db.Model(&models.Article{})
+	if q != "" {
+		like := "%" + strings.ToLower(q) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(description) LIKE ?", like, like)
+	}
+	if activeStr != "" {
+		if active, err := strconv.ParseBool(activeStr); err == nil {
+			query = query.Where("active = ?", active)
+		}
+	}
 
+	if err := query.Limit(limit).Offset(offset).Find(&articles).Error; err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "db error")
+	}
 	return c.JSON(fiber.Map{
 		"articles": articles,
 		"message":  "success",
 	})
+}
+
+func parseIntDefault(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && v >= 0 {
+		return v
+	}
+	return def
 }
