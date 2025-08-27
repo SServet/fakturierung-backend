@@ -7,14 +7,13 @@ import (
 
 type Article struct {
 	Id          string  `json:"id" gorm:"primaryKey"`
-	Name        string  `json:"name" gorm:"not null"`
+	Name        string  `json:"name" gorm:"not null;index"` // index helps search/sort
 	Description string  `json:"description"`
 	UnitPrice   float64 `json:"unit_price"`
-	Active      bool    `json:"-"`
+	Active      bool    `json:"active" gorm:"index"` // fixed (was json:"-")
 }
 
 func (article *Article) BeforeCreate(tx *gorm.DB) (err error) {
-	// UUID version 4
 	article.Id = uuid.NewString()
 	return
 }

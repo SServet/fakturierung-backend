@@ -4,6 +4,7 @@ import (
 	"fakturierung-backend/database"
 	"fakturierung-backend/routes"
 	"fmt"
+	"os"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -15,14 +16,24 @@ func main() {
 
 	app := fiber.New()
 
-	// 1) CORS: allow only your React origin and the headers you'll send
+	// CORS: allow origins from environment or default to all (for dev)
+	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "*"
+	}
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://192.168.0.180:3000",
-		AllowCredentials: false, // no cookies
+		AllowOrigins:     allowedOrigins,
+		AllowCredentials: false, // no cookies needed (using token auth)
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Tenant-Schema",
 	}))
 
 	routes.Setup(app)
-	app.Listen(":8080")
-	fmt.Println("🚀 started here we go")
+
+	// Listen on port from environment or default to 8080
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	app.Listen(":" + port)
+	fmt.Println("🚀 API server started on port", port)
 }

@@ -1,14 +1,15 @@
 package controllers
 
 import (
-	"fakturierung-backend/database"
-	"fakturierung-backend/middlewares"
-	"fakturierung-backend/models"
 	"fmt"
 	"net/mail"
 	"regexp"
 	"strings"
 	"time"
+
+	"fakturierung-backend/database"
+	"fakturierung-backend/middlewares"
+	"fakturierung-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -16,15 +17,12 @@ import (
 
 func Register(c *fiber.Ctx) error {
 	var data map[string]string
-
 	if err := c.BodyParser(&data); err != nil {
 		return err
 	}
 
 	var mailExist models.User
-
 	database.DB.Where("email = ?", data["email"]).First(&mailExist)
-
 	if mailExist.Email != "" {
 		c.Status(fiber.StatusBadRequest)
 		return c.JSON(fiber.Map{
@@ -46,9 +44,7 @@ func Register(c *fiber.Ctx) error {
 		LastName:  data["last_name"],
 		Email:     data["email"],
 	}
-
 	user.SetPassword(data["password"])
-
 	if err := tx.Create(&user).Error; err != nil {
 		tx.Rollback()
 		c.Status(fiber.StatusBadRequest)
@@ -66,7 +62,6 @@ func Register(c *fiber.Ctx) error {
 		PhoneNumber:  data["phone_number"],
 		MobileNumber: data["mobile_number"],
 	}
-
 	if err := tx.Create(&contactPerson).Error; err != nil {
 		tx.Rollback()
 		c.Status(fiber.StatusBadRequest)
@@ -89,7 +84,6 @@ func Register(c *fiber.Ctx) error {
 	}
 
 	schemaName, err := createSchema(company.CompanyName)
-
 	if err != nil {
 		tx.Rollback()
 		c.Status(fiber.StatusInternalServerError)
@@ -98,7 +92,6 @@ func Register(c *fiber.Ctx) error {
 			"error":   err.Error(),
 		})
 	}
-
 	company.SchemaName = schemaName
 
 	if err := tx.Create(&company).Error; err != nil {
@@ -111,7 +104,6 @@ func Register(c *fiber.Ctx) error {
 	}
 
 	user.SchemaName = schemaName
-
 	if err := tx.Updates(&user).Error; err != nil {
 		tx.Rollback()
 		c.Status(fiber.StatusBadRequest)
@@ -121,12 +113,13 @@ func Register(c *fiber.Ctx) error {
 		})
 	}
 
-	err = database.MigrateTenantSchema(schemaName)
+	err = database.MigrateTenantSchema(c)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"message": "Could not migrate tenant schema"})
 	}
 
 	tx.Commit()
+
 	database.DB.Preload("User").Preload("ContactPerson").First(&company)
 	return c.JSON(company)
 }
@@ -134,7 +127,6 @@ func Register(c *fiber.Ctx) error {
 func createSchema(customer string) (string, error) {
 	safeName := strings.ToLower(strings.TrimSpace(customer))
 	safeName = strings.ReplaceAll(safeName, " ", "_")
-
 	// Validate schema name (only letters, numbers, underscores; must start with letter/underscore)
 	valid := regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 	if !valid.MatchString(safeName) {
@@ -145,22 +137,18 @@ func createSchema(customer string) (string, error) {
 	if err := database.DB.Exec("CREATE SCHEMA IF NOT EXISTS " + safeName).Error; err != nil {
 		return "", err
 	}
-
 	return safeName, nil
 }
 
 func Login(c *fiber.Ctx) error {
 	var data map[string]string
-
 	if err := c.BodyParser(&data); err != nil {
 		return err
 	}
 
 	var user models.User
 
-	_, err := mail.ParseAddress(data["email"])
-
-	if err != nil {
+	if _, err := mail.ParseAddress(data["email"]); err != nil {
 		c.Status(fiber.StatusBadRequest)
 		return c.JSON(fiber.Map{
 			"message": "Invaild email format",
@@ -170,8 +158,7 @@ func Login(c *fiber.Ctx) error {
 	database.DB.Exec("SET search_path TO public")
 	database.DB.Table("public.users").Where("email = ?", data["email"]).First(&user)
 
-	_, err = uuid.Parse(user.Id)
-	if err != nil {
+	if _, err := uuid.Parse(user.Id); err != nil {
 		c.Status(fiber.StatusBadRequest)
 		return c.JSON(fiber.Map{
 			"message": "Invaild Credentials 1",
@@ -187,7 +174,6 @@ func Login(c *fiber.Ctx) error {
 	}
 
 	token, err := middlewares.GenerateJWT(user.Id, user.SchemaName)
-
 	if err != nil {
 		c.Status(fiber.StatusBadRequest)
 		return c.JSON(fiber.Map{
@@ -196,17 +182,15 @@ func Login(c *fiber.Ctx) error {
 		})
 	}
 
-	/*
-		cookie := fiber.Cookie{
-			Name:     "jwt",
-			Value:    token,
-			Expires:  time.Now().Add(time.Hour * 24),
-			HTTPOnly: true,
-		}
+	/* cookie := fiber.Cookie{
+		Name:     "jwt",
+		Value:    token,
+		Expires:  time.Now().Add(time.Hour * 24),
+		HTTPOnly: true,
+	}
+	c.Cookie(&cookie) */
 
-		c.Cookie(&cookie)
-	*/
-	err = database.MigrateTenantSchema(user.SchemaName)
+	err = database.MigrateTenantSchema(c)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"message": "Could not migrate tenant schema"})
 	}
@@ -220,7 +204,6 @@ func Login(c *fiber.Ctx) error {
 			"email": user.Email,
 		},
 	})
-
 }
 
 func Logout(c *fiber.Ctx) error {
@@ -230,9 +213,7 @@ func Logout(c *fiber.Ctx) error {
 		Expires:  time.Now().Add(-time.Hour),
 		HTTPOnly: true,
 	}
-
 	c.Cookie(&cookie)
-
 	return c.JSON(fiber.Map{
 		"message": "success",
 	})

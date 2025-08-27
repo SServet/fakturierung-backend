@@ -1,36 +1,46 @@
 package routes
 
 import (
+	"github.com/gofiber/fiber/v2"
+
 	"fakturierung-backend/controllers"
 	"fakturierung-backend/middlewares"
-
-	"github.com/gofiber/fiber/v2"
 )
 
-func Setup(app *fiber.App) {
-	api := app.Group("api")
+func Register(app *fiber.App) {
+	api := app.Group("/api")
 
-	api.Post("registration", controllers.Register)
-	api.Post("login", controllers.Login)
-	api.Post("logout", controllers.Logout)
+	// Public auth endpoints
+	api.Post("/registration", controllers.Register)
+	api.Post("/login", controllers.Login)
+	api.Post("/logout", controllers.Logout)
 
-	authenticated := api.Use(middlewares.IsAuthenticatedHeader)
+	// Protected endpoints
+	protected := api.Group("")
+	protected.Use(middlewares.IsAuthenticatedHeader)
 
-	//Customer Routes
-	authenticated.Post("customer", controllers.CreateCustomer)
-	authenticated.Put("customer", controllers.UpdateCustomer)
-	authenticated.Get("customers", controllers.GetCustomers)
-	authenticated.Get("customers/:id", controllers.GetCustomer)
+	// Customers
+	protected.Post("/customer", controllers.CreateCustomer)
+	protected.Put("/customer/:id", controllers.UpdateCustomer) // << changed to :id
+	protected.Get("/customers", controllers.GetCustomers)
 
-	//Article Routes
-	authenticated.Post("article", controllers.CreateArticles)
-	authenticated.Put("article", controllers.UpdateArticle)
-	authenticated.Get("articles", controllers.GetArticles)
+	// Articles
+	protected.Post("/article", controllers.CreateArticles)
+	protected.Put("/articles/:id", controllers.UpdateArticle) // << changed to :id
+	protected.Get("/articles", controllers.GetArticles)
 
-	//Invoice Routes
-	authenticated.Post("invoice", controllers.CreateInvoice)
-	authenticated.Put("inovice", controllers.UpdateInvoice)
-	authenticated.Get("invoices", controllers.GetInvoices)
-	authenticated.Get("invoices/:id", controllers.GetInvoice)
-	authenticated.Put("invoices/publish/:id", controllers.PublishInvoice)
+	// Invoices (versioned)
+	protected.Post("/invoice", controllers.CreateInvoice)
+	protected.Put("/invoices/:id", controllers.UpdateInvoice)
+	protected.Get("/invoices", controllers.GetInvoices)
+	protected.Get("/invoice/:id", controllers.GetInvoice)
+
+	protected.Put("/invoices/:id/convert", controllers.ConvertInvoice)
+	protected.Put("/invoices/:id/publish", controllers.PublishInvoice)
+
+	protected.Get("/invoices/:id/versions", controllers.GetInvoiceVersions)
+
+	protected.Post("/invoices/:id/payments", controllers.CreatePayment)
+	protected.Get("/invoices/:id/payments", controllers.ListPayments)
+
 }
