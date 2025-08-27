@@ -8,6 +8,7 @@ import (
 	"fakturierung-backend/database"
 	"fakturierung-backend/middlewares"
 	"fakturierung-backend/models"
+	"fakturierung-backend/utils"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -20,11 +21,12 @@ type ArticleDTO struct {
 	Active      bool    `json:"active" validate:"required"`
 }
 
+// Pointer-based for partial updates
 type ArticleUpdateDTO struct {
-	Name        string  `json:"name" validate:"required,min=1"`
-	Description string  `json:"description" validate:"omitempty"`
-	UnitPrice   float64 `json:"unit_price" validate:"required,gt=0"`
-	Active      bool    `json:"active" validate:"required"`
+	Name        *string  `json:"name" validate:"omitempty,min=0"`
+	Description *string  `json:"description" validate:"omitempty"`
+	UnitPrice   *float64 `json:"unit_price" validate:"omitempty,gt=0"`
+	Active      *bool    `json:"active" validate:"omitempty"`
 }
 
 // POST /api/article  (batch create: accepts JSON array of ArticleDTO)
@@ -37,11 +39,11 @@ func CreateArticles(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "no articles provided")
 	}
 
-	// Validate each element
 	for i := range inputs {
 		if err := middlewares.ValidateStruct(inputs[i]); err != nil {
 			return err
 		}
+		utils.NormalizeDTO(&inputs[i])
 	}
 
 	db, err := database.GetTenantDB(c)
@@ -52,14 +54,13 @@ func CreateArticles(c *fiber.Ctx) error {
 	articles := make([]models.Article, 0, len(inputs))
 	for _, in := range inputs {
 		articles = append(articles, models.Article{
-			Name:        strings.TrimSpace(in.Name),
-			Description: strings.TrimSpace(in.Description),
-			UnitPrice:   in.UnitPrice,
+			Name:        in.Name,
+			Description: in.Description,
+			UnitPrice:   in.UnitPrice, // already rounded in NormalizeDTO
 			Active:      in.Active,
 		})
 	}
 
-	// Efficient bulk insert
 	if err := db.CreateInBatches(&articles, 100).Error; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not create articles")
 	}
@@ -77,6 +78,7 @@ func UpdateArticle(c *fiber.Ctx) error {
 	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
+	utils.NormalizePtrDTO(&in)
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
@@ -92,13 +94,8 @@ func UpdateArticle(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	updates := map[string]interface{}{
-		"name":        strings.TrimSpace(in.Name),
-		"description": strings.TrimSpace(in.Description),
-		"unit_price":  in.UnitPrice,
-		"active":      in.Active,
-	}
-	if err := db.Model(&models.Article{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	// Only non-nil fields are updated
+	if err := db.Model(&models.Article{}).Where("id = ?", id).Updates(in).Error; err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not update article")
 	}
 
@@ -109,7 +106,7 @@ func UpdateArticle(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
-// GET /api/articles?q=<term>&active=true|false&limit=50&offset=0
+// GET /api/articles?q=...&active=true|false&limit=50&offset=0
 func GetArticles(c *fiber.Ctx) error {
 	var articles []models.Article
 
@@ -120,7 +117,7 @@ func GetArticles(c *fiber.Ctx) error {
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
+		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
 	query := db.Model(&models.Article{})

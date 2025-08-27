@@ -2,11 +2,13 @@ package controllers
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"fakturierung-backend/database"
 	"fakturierung-backend/middlewares"
 	"fakturierung-backend/models"
+	"fakturierung-backend/utils"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -18,23 +20,25 @@ type SupplierCreateDTO struct {
 	City         string `json:"city" validate:"required,min=1"`
 	Country      string `json:"country" validate:"required,min=1"`
 	Zip          string `json:"zip" validate:"required,min=1"`
-	Homepage     string `json:"homepage" validate:"omitempty,url"`
-	UID          string `json:"uid" validate:"omitempty"`
-	Email        string `json:"email" validate:"required,email"`
-	PhoneNumber  string `json:"phone_number" validate:"required"`
-	MobileNumber string `json:"mobile_number" validate:"required"`
-}
-
-type SupplierUpdateDTO struct {
-	Address      string `json:"address" validate:"omitempty"`
-	City         string `json:"city" validate:"omitempty"`
-	Country      string `json:"country" validate:"omitempty"`
-	Zip          string `json:"zip" validate:"omitempty"`
-	Homepage     string `json:"homepage" validate:"omitempty,url"`
-	UID          string `json:"uid" validate:"omitempty"`
-	Email        string `json:"email" validate:"omitempty,email"`
 	PhoneNumber  string `json:"phone_number" validate:"omitempty"`
 	MobileNumber string `json:"mobile_number" validate:"omitempty"`
+	Homepage     string `json:"homepage" validate:"omitempty"`
+	UID          string `json:"uid" validate:"omitempty"`
+	Email        string `json:"email" validate:"omitempty,email"`
+}
+
+// Pointer-based for partial updates (only non-nil fields are updated)
+type SupplierUpdateDTO struct {
+	CompanyName  *string `json:"company_name" validate:"omitempty"`
+	Address      *string `json:"address" validate:"omitempty"`
+	City         *string `json:"city" validate:"omitempty"`
+	Country      *string `json:"country" validate:"omitempty"`
+	Zip          *string `json:"zip" validate:"omitempty"`
+	PhoneNumber  *string `json:"phone_number" validate:"omitempty"`
+	MobileNumber *string `json:"mobile_number" validate:"omitempty"`
+	Homepage     *string `json:"homepage" validate:"omitempty"`
+	UID          *string `json:"uid" validate:"omitempty"`
+	Email        *string `json:"email" validate:"omitempty,email"`
 }
 
 // POST /api/supplier
@@ -43,75 +47,68 @@ func CreateSupplier(c *fiber.Ctx) error {
 	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
+	utils.NormalizeDTO(&in)
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
+		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
 	supplier := models.Supplier{
-		CompanyName:  strings.TrimSpace(in.CompanyName),
-		Address:      strings.TrimSpace(in.Address),
-		City:         strings.TrimSpace(in.City),
-		Country:      strings.TrimSpace(in.Country),
-		Zip:          strings.TrimSpace(in.Zip),
-		Homepage:     strings.TrimSpace(in.Homepage),
-		UID:          strings.TrimSpace(in.UID),
-		Email:        strings.TrimSpace(in.Email),
-		PhoneNumber:  strings.TrimSpace(in.PhoneNumber),
-		MobileNumber: strings.TrimSpace(in.MobileNumber),
+		CompanyName:  in.CompanyName,
+		Address:      in.Address,
+		City:         in.City,
+		Country:      in.Country,
+		Zip:          in.Zip,
+		PhoneNumber:  in.PhoneNumber,
+		MobileNumber: in.MobileNumber,
+		Homepage:     in.Homepage,
+		UID:          in.UID,
+		Email:        in.Email,
 	}
-
 	if err := db.Create(&supplier).Error; err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not create supplier")
 	}
-	return c.JSON(supplier)
+	return c.Status(fiber.StatusCreated).JSON(supplier)
 }
 
 // PUT /api/supplier/:id
 func UpdateSupplier(c *fiber.Ctx) error {
-	id := strings.TrimSpace(c.Params("id"))
-	if id == "" {
+	idStr := strings.TrimSpace(c.Params("id"))
+	if idStr == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "missing supplier id in path")
+	}
+	if _, err := strconv.Atoi(idStr); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid supplier id")
 	}
 
 	var in SupplierUpdateDTO
 	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
+	utils.NormalizePtrDTO(&in)
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "tenant db unavailable")
+		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
-	// Ensure exists
+	// Ensure exists first (clean 404)
 	var existing models.Supplier
-	if err := db.First(&existing, "id = ?", id).Error; err != nil {
+	if err := db.First(&existing, "id = ?", idStr).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "supplier not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	updates := map[string]interface{}{
-		"address":       strings.TrimSpace(in.Address),
-		"city":          strings.TrimSpace(in.City),
-		"country":       strings.TrimSpace(in.Country),
-		"zip":           strings.TrimSpace(in.Zip),
-		"homepage":      strings.TrimSpace(in.Homepage),
-		"uid":           strings.TrimSpace(in.UID),
-		"email":         strings.TrimSpace(in.Email),
-		"phone_number":  strings.TrimSpace(in.PhoneNumber),
-		"mobile_number": strings.TrimSpace(in.MobileNumber),
-	}
-
-	if err := db.Model(&models.Supplier{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	// Only non-nil fields get applied
+	if err := db.Model(&models.Supplier{}).Where("id = ?", idStr).Updates(in).Error; err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not update supplier")
 	}
 
 	var out models.Supplier
-	if err := db.First(&out, "id = ?", id).Error; err != nil {
+	if err := db.First(&out, "id = ?", idStr).Error; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to reload supplier")
 	}
 	return c.JSON(out)

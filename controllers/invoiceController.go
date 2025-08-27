@@ -34,9 +34,10 @@ type InvoiceCreateDTO struct {
 	Items      []InvoiceItemDTO `json:"items" validate:"required,min=1,dive"`
 }
 
+// Pointer-based partial update (only non-nil fields will be updated)
 type InvoiceUpdateDTO struct {
-	CustomerID uint             `json:"customer_id" validate:"required,gt=0"`
-	Items      []InvoiceItemDTO `json:"items" validate:"required,min=1,dive"`
+	CustomerID *uint             `json:"customer_id" validate:"omitempty,gt=0"`
+	Items      *[]InvoiceItemDTO `json:"items" validate:"omitempty,min=1"` // we'll validate inner items explicitly when present
 }
 
 type PaymentCreateDTO struct {
@@ -264,6 +265,9 @@ func CreateInvoice(c *fiber.Ctx) error {
 		if err := middlewares.BindAndValidate(c, &in); err != nil {
 			return err
 		}
+		// normalize scalars in create DTO
+		utils.NormalizeDTO(&in)
+
 		switch strings.ToLower(strings.TrimSpace(in.Type)) {
 		case "quotation":
 			draft = true
@@ -302,7 +306,7 @@ func CreateInvoice(c *fiber.Ctx) error {
 
 	var out models.Invoice
 	err = db.Transaction(func(tx *gorm.DB) error {
-		// Validate that all article IDs are present and active
+		// Validate articles (exist & active)
 		if err := validateArticleRefs(tx, items, true); err != nil {
 			return err
 		}
@@ -329,13 +333,12 @@ func CreateInvoice(c *fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		// If it’s an FK violation or validation, we surface a clean 400/409 message via ErrorHandler.
 		return err
 	}
 	return c.JSON(out)
 }
 
-// PUT /api/invoices/:id
+// PUT /api/invoices/:id  (pointer DTO → only non-nil fields updated)
 func UpdateInvoice(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
@@ -355,54 +358,108 @@ func UpdateInvoice(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	var items []models.InvoiceItem
-	var subtotal, taxTotal float64
-	var customerID uint
-
+	// JSON path with pointer DTO (preferred). Legacy form path kept for compatibility.
 	if strings.Contains(strings.ToLower(c.Get("Content-Type")), "application/json") {
 		var in InvoiceUpdateDTO
 		if err := middlewares.BindAndValidate(c, &in); err != nil {
 			return err
 		}
-		items, subtotal, taxTotal = toItems(in.Items, 0.2)
-		customerID = in.CustomerID
-	} else {
-		var data map[string]string
-		if err := c.BodyParser(&data); err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+
+		var newItems []models.InvoiceItem
+		var subtotal, taxTotal float64
+		itemsProvided := in.Items != nil
+		if itemsProvided {
+			// validate each item when provided
+			for _, it := range *in.Items {
+				if err := middlewares.ValidateStruct(it); err != nil {
+					return err
+				}
+			}
+			newItems, subtotal, taxTotal = toItems(*in.Items, 0.2)
 		}
-		cid, err := strconv.Atoi(data["customer_id"])
-		if err != nil || cid <= 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "invalid customer id")
+
+		type invoicePatch struct {
+			CId      *uint    `gorm:"column:c_id"`
+			Subtotal *float64 `gorm:"column:subtotal"`
+			TaxTotal *float64 `gorm:"column:tax_total"`
+			Total    *float64 `gorm:"column:total"`
 		}
-		customerID = uint(cid)
-		var e error
-		items, subtotal, taxTotal, e = extractInvoiceItems(data)
-		if e != nil {
-			return fiber.NewError(fiber.StatusBadRequest, e.Error())
+		var patch invoicePatch
+		if in.CustomerID != nil {
+			patch.CId = in.CustomerID
 		}
+		if itemsProvided {
+			st := utils.Round2(subtotal)
+			tt := utils.Round2(taxTotal)
+			t := utils.Round2(subtotal + taxTotal)
+			patch.Subtotal = &st
+			patch.TaxTotal = &tt
+			patch.Total = &t
+		}
+
+		var out models.Invoice
+		err = db.Transaction(func(tx *gorm.DB) error {
+			// If items provided → validate article refs & replace items
+			if itemsProvided {
+				if err := validateArticleRefs(tx, newItems, true); err != nil {
+					return err
+				}
+			}
+
+			// Apply scalar patch (only non-nil pointers will be updated)
+			if err := tx.Model(&models.Invoice{}).Where("id = ?", id).Updates(&patch).Error; err != nil {
+				return err
+			}
+
+			// Replace items when provided
+			if itemsProvided {
+				if err := tx.Model(&existing).Association("Items").Replace(newItems); err != nil {
+					return err
+				}
+			}
+
+			if err := tx.Preload(clause.Associations).First(&out, "id = ?", id).Error; err != nil {
+				return err
+			}
+			return snapshotInvoice(tx, &out)
+		})
+		if err != nil {
+			return err
+		}
+		return c.JSON(out)
 	}
 
+	// ---- Legacy form path (requires full payload) ----
+	var data map[string]string
+	if err := c.BodyParser(&data); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	cid, err := strconv.Atoi(data["customer_id"])
+	if err != nil || cid <= 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid customer id")
+	}
+	newItems, subtotal, taxTotal, e := extractInvoiceItems(data)
+	if e != nil {
+		return fiber.NewError(fiber.StatusBadRequest, e.Error())
+	}
 	total := utils.Round2(subtotal + taxTotal)
 
 	var out models.Invoice
 	err = db.Transaction(func(tx *gorm.DB) error {
-		// Validate articles exist (and active)
-		if err := validateArticleRefs(tx, items, true); err != nil {
+		if err := validateArticleRefs(tx, newItems, true); err != nil {
 			return err
 		}
-
 		if err := tx.Model(&models.Invoice{}).
 			Where("id = ?", id).
 			Updates(map[string]any{
-				"c_id":      customerID,
+				"c_id":      uint(cid),
 				"subtotal":  utils.Round2(subtotal),
 				"tax_total": utils.Round2(taxTotal),
 				"total":     total,
 			}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&existing).Association("Items").Replace(items); err != nil {
+		if err := tx.Model(&existing).Association("Items").Replace(newItems); err != nil {
 			return err
 		}
 		if err := tx.Preload(clause.Associations).First(&out, "id = ?", id).Error; err != nil {
@@ -416,7 +473,7 @@ func UpdateInvoice(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
-// GET /api/invoices
+// GET /api/invoices?type=quotation|invoice|published&limit=50&offset=0
 func GetInvoices(c *fiber.Ctx) error {
 	var invoices []models.Invoice
 
@@ -467,6 +524,7 @@ func GetInvoice(c *fiber.Ctx) error {
 }
 
 // PUT /api/invoices/:id/convert
+// Body: { "target": "quotation" | "invoice" }  — snapshot after convert
 func ConvertInvoice(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
@@ -502,13 +560,24 @@ func ConvertInvoice(c *fiber.Ctx) error {
 }
 
 // PUT /api/invoices/:id/publish
+// Assign number if absent; mark published; snapshot
 func PublishInvoice(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid invoice id")
 	}
-	var payload map[string]string
+
+	var payload struct {
+		InvoiceNumber *string `json:"invoice_number" validate:"omitempty"`
+	}
 	_ = json.Unmarshal(c.Body(), &payload)
+	if payload.InvoiceNumber != nil {
+		trim := strings.TrimSpace(*payload.InvoiceNumber)
+		payload.InvoiceNumber = &trim
+		if *payload.InvoiceNumber == "" {
+			payload.InvoiceNumber = nil
+		}
+	}
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
@@ -525,11 +594,12 @@ func PublishInvoice(c *fiber.Ctx) error {
 			return err
 		}
 		now := time.Now().UTC()
-		number := strings.TrimSpace(payload["invoice_number"])
-		if number == "" && inv.InvoiceNumber == "" {
+		number := inv.InvoiceNumber
+		if payload.InvoiceNumber != nil {
+			number = *payload.InvoiceNumber
+		}
+		if number == "" {
 			number = generateInvoiceNumber()
-		} else if number == "" {
-			number = inv.InvoiceNumber
 		}
 		if err := tx.Model(&models.Invoice{}).
 			Where("id = ?", id).
@@ -573,6 +643,7 @@ func GetInvoiceVersions(c *fiber.Ctx) error {
 }
 
 // POST /api/invoices/:id/payments
+// Body: { "amount":123.45, "method":"bank-transfer", "reference":"...", "note":"...", "paid_at":"2025-08-27T10:00:00Z" }
 func CreatePayment(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
@@ -582,8 +653,6 @@ func CreatePayment(c *fiber.Ctx) error {
 	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
 	}
-	amount := utils.Round2(in.Amount)
-
 	paidAt := time.Now().UTC()
 	if strings.TrimSpace(in.PaidAt) != "" {
 		t, err := time.Parse(time.RFC3339, in.PaidAt)
@@ -609,7 +678,7 @@ func CreatePayment(c *fiber.Ctx) error {
 		}
 		payment = models.Payment{
 			InvoiceID: uint(id),
-			Amount:    amount,
+			Amount:    utils.Round2(in.Amount),
 			Method:    strings.TrimSpace(in.Method),
 			Reference: strings.TrimSpace(in.Reference),
 			Note:      strings.TrimSpace(in.Note),
