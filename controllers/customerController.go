@@ -14,6 +14,8 @@ import (
 	"gorm.io/gorm"
 )
 
+// ===== DTOs =====
+
 type CustomerCreateDTO struct {
 	FirstName    string `json:"first_name" validate:"required,min=1"`
 	LastName     string `json:"last_name" validate:"required,min=1"`
@@ -31,8 +33,9 @@ type CustomerCreateDTO struct {
 	Email        string `json:"email" validate:"required,email"`
 }
 
-// Pointer-based for partial updates
+// Pointer-based partial update; requires optimistic-lock version
 type CustomerUpdateDTO struct {
+	Version      uint    `json:"version" validate:"required,gt=0"`
 	FirstName    *string `json:"first_name" validate:"omitempty"`
 	LastName     *string `json:"last_name" validate:"omitempty"`
 	Salutation   *string `json:"salutation" validate:"omitempty"`
@@ -48,6 +51,8 @@ type CustomerUpdateDTO struct {
 	UID          *string `json:"uid" validate:"omitempty"`
 	Email        *string `json:"email" validate:"omitempty,email"`
 }
+
+// ===== Handlers =====
 
 // POST /api/customer
 func CreateCustomer(c *fiber.Ctx) error {
@@ -127,7 +132,7 @@ func UpdateCustomer(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
-	// Ensure exists first
+	// Ensure exists first (for clean 404)
 	var existing models.Customer
 	if err := db.First(&existing, "id = ?", idStr).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -136,9 +141,20 @@ func UpdateCustomer(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	// Updates with pointer DTO: only non-nil fields are applied
-	if err := db.Model(&models.Customer{}).Where("id = ?", idStr).Updates(in).Error; err != nil {
+	updates := utils.UpdatesFromPtrDTO(&in, nil)
+	if len(updates) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "no fields to update")
+	}
+	updates["version"] = gorm.Expr("version + 1")
+
+	res := db.Model(&models.Customer{}).
+		Where("id = ? AND version = ?", idStr, in.Version).
+		Updates(updates)
+	if res.Error != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not update customer")
+	}
+	if res.RowsAffected == 0 {
+		return fiber.NewError(fiber.StatusConflict, "stale update, please reload")
 	}
 
 	var out models.Customer
@@ -150,8 +166,8 @@ func UpdateCustomer(c *fiber.Ctx) error {
 
 // GET /api/customers?limit=50&offset=0
 func GetCustomers(c *fiber.Ctx) error {
-	limit := parseIntDefault(c.Query("limit"), 50)
-	offset := parseIntDefault(c.Query("offset"), 0)
+	limit := utils.ParseIntDefault(c.Query("limit"), 50)
+	offset := utils.ParseIntDefault(c.Query("offset"), 0)
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {

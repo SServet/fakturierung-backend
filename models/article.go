@@ -11,6 +11,7 @@ type Article struct {
 	Description string  `json:"description"`
 	UnitPrice   float64 `json:"unit_price" gorm:"type:numeric(12,2)"`
 	Active      bool    `json:"active" gorm:"index"`
+	Version     uint    `json:"version" gorm:"not null;default:1"`
 }
 
 func (article *Article) BeforeCreate(tx *gorm.DB) (err error) {

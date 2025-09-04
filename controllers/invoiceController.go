@@ -34,10 +34,11 @@ type InvoiceCreateDTO struct {
 	Items      []InvoiceItemDTO `json:"items" validate:"required,min=1,dive"`
 }
 
-// Pointer-based partial update (only non-nil fields will be updated)
+// Pointer-based partial update (only non-nil fields updated) + required optimistic-lock version
 type InvoiceUpdateDTO struct {
+	Version    uint              `json:"version" validate:"required,gt=0"`
 	CustomerID *uint             `json:"customer_id" validate:"omitempty,gt=0"`
-	Items      *[]InvoiceItemDTO `json:"items" validate:"omitempty,min=1"` // we'll validate inner items explicitly when present
+	Items      *[]InvoiceItemDTO `json:"items" validate:"omitempty,min=1"` // if present, each item will be validated
 }
 
 type PaymentCreateDTO struct {
@@ -63,8 +64,8 @@ func toItems(items []InvoiceItemDTO, taxRate float64) ([]models.InvoiceItem, flo
 		taxTotal = utils.Round2(taxTotal + tax)
 
 		out = append(out, models.InvoiceItem{
-			ArticleID:   it.ArticleID,
-			Description: it.Description,
+			ArticleID:   strings.TrimSpace(it.ArticleID),
+			Description: strings.TrimSpace(it.Description),
 			Amount:      it.Amount,
 			UnitPrice:   unit,
 			TaxRate:     taxRate,
@@ -111,8 +112,8 @@ func extractInvoiceItems(data map[string]string) ([]models.InvoiceItem, float64,
 		taxTotal = utils.Round2(taxTotal + tax)
 
 		items = append(items, models.InvoiceItem{
-			ArticleID:   articleID,
-			Description: description,
+			ArticleID:   strings.TrimSpace(articleID),
+			Description: strings.TrimSpace(description),
 			Amount:      amount,
 			UnitPrice:   unit,
 			TaxRate:     taxRate,
@@ -265,7 +266,6 @@ func CreateInvoice(c *fiber.Ctx) error {
 		if err := middlewares.BindAndValidate(c, &in); err != nil {
 			return err
 		}
-		// normalize scalars in create DTO
 		utils.NormalizeDTO(&in)
 
 		switch strings.ToLower(strings.TrimSpace(in.Type)) {
@@ -281,6 +281,7 @@ func CreateInvoice(c *fiber.Ctx) error {
 		items, subtotal, taxTotal = toItems(in.Items, 0.2)
 		customerID = in.CustomerID
 	} else {
+		// legacy form
 		var data map[string]string
 		if err := c.BodyParser(&data); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -296,9 +297,10 @@ func CreateInvoice(c *fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, "invalid customer id")
 		}
 		customerID = uint(cid)
-		items, subtotal, taxTotal, err = extractInvoiceItems(data)
-		if err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		var e error
+		items, subtotal, taxTotal, e = extractInvoiceItems(data)
+		if e != nil {
+			return fiber.NewError(fiber.StatusBadRequest, e.Error())
 		}
 	}
 
@@ -306,7 +308,7 @@ func CreateInvoice(c *fiber.Ctx) error {
 
 	var out models.Invoice
 	err = db.Transaction(func(tx *gorm.DB) error {
-		// Validate articles (exist & active)
+		// Validate all article IDs exist & active
 		if err := validateArticleRefs(tx, items, true); err != nil {
 			return err
 		}
@@ -322,6 +324,7 @@ func CreateInvoice(c *fiber.Ctx) error {
 			Published:     false,
 			PublishedAt:   nil,
 			PaidTotal:     0,
+			Version:       1, // start optimistic-lock version at 1
 		}
 		if err := tx.Create(&invoice).Error; err != nil {
 			return err
@@ -338,7 +341,7 @@ func CreateInvoice(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
-// PUT /api/invoices/:id  (pointer DTO → only non-nil fields updated)
+// PUT /api/invoices/:id  — requires optimistic-lock `version`
 func UpdateInvoice(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
@@ -350,6 +353,7 @@ func UpdateInvoice(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
+	// Ensure exists (clean 404)
 	var existing models.Invoice
 	if err := db.Preload("Items").First(&existing, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -358,18 +362,19 @@ func UpdateInvoice(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	// JSON path with pointer DTO (preferred). Legacy form path kept for compatibility.
+	// JSON (pointer DTO) preferred; legacy form kept for compatibility
 	if strings.Contains(strings.ToLower(c.Get("Content-Type")), "application/json") {
 		var in InvoiceUpdateDTO
 		if err := middlewares.BindAndValidate(c, &in); err != nil {
 			return err
 		}
+		utils.NormalizePtrDTO(&in)
 
 		var newItems []models.InvoiceItem
 		var subtotal, taxTotal float64
 		itemsProvided := in.Items != nil
 		if itemsProvided {
-			// validate each item when provided
+			// validate each item
 			for _, it := range *in.Items {
 				if err := middlewares.ValidateStruct(it); err != nil {
 					return err
@@ -397,27 +402,37 @@ func UpdateInvoice(c *fiber.Ctx) error {
 			patch.Total = &t
 		}
 
-		var out models.Invoice
+		// perform atomic update with version check + optional items replace + snapshot
 		err = db.Transaction(func(tx *gorm.DB) error {
-			// If items provided → validate article refs & replace items
 			if itemsProvided {
 				if err := validateArticleRefs(tx, newItems, true); err != nil {
 					return err
 				}
 			}
 
-			// Apply scalar patch (only non-nil pointers will be updated)
-			if err := tx.Model(&models.Invoice{}).Where("id = ?", id).Updates(&patch).Error; err != nil {
-				return err
+			res := tx.Model(&models.Invoice{}).
+				Where("id = ? AND version = ?", id, in.Version).
+				Updates(map[string]any{
+					"c_id":      patch.CId,
+					"subtotal":  patch.Subtotal,
+					"tax_total": patch.TaxTotal,
+					"total":     patch.Total,
+					"version":   gorm.Expr("version + 1"),
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return fiber.NewError(fiber.StatusConflict, "stale update, please reload")
 			}
 
-			// Replace items when provided
 			if itemsProvided {
 				if err := tx.Model(&existing).Association("Items").Replace(newItems); err != nil {
 					return err
 				}
 			}
 
+			var out models.Invoice
 			if err := tx.Preload(clause.Associations).First(&out, "id = ?", id).Error; err != nil {
 				return err
 			}
@@ -426,14 +441,21 @@ func UpdateInvoice(c *fiber.Ctx) error {
 		if err != nil {
 			return err
 		}
-		return c.JSON(out)
+		return c.SendStatus(fiber.StatusNoContent)
 	}
 
-	// ---- Legacy form path (requires full payload) ----
+	// ---- Legacy form path ----
 	var data map[string]string
 	if err := c.BodyParser(&data); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
+	versionStr := data["version"]
+	v, err := strconv.Atoi(versionStr)
+	if err != nil || v <= 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "version is required")
+	}
+	clientVersion := uint(v)
+
 	cid, err := strconv.Atoi(data["customer_id"])
 	if err != nil || cid <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid customer id")
@@ -444,24 +466,31 @@ func UpdateInvoice(c *fiber.Ctx) error {
 	}
 	total := utils.Round2(subtotal + taxTotal)
 
-	var out models.Invoice
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := validateArticleRefs(tx, newItems, true); err != nil {
 			return err
 		}
-		if err := tx.Model(&models.Invoice{}).
-			Where("id = ?", id).
+
+		res := tx.Model(&models.Invoice{}).
+			Where("id = ? AND version = ?", id, clientVersion).
 			Updates(map[string]any{
 				"c_id":      uint(cid),
 				"subtotal":  utils.Round2(subtotal),
 				"tax_total": utils.Round2(taxTotal),
 				"total":     total,
-			}).Error; err != nil {
-			return err
+				"version":   gorm.Expr("version + 1"),
+			})
+		if res.Error != nil {
+			return res.Error
 		}
+		if res.RowsAffected == 0 {
+			return fiber.NewError(fiber.StatusConflict, "stale update, please reload")
+		}
+
 		if err := tx.Model(&existing).Association("Items").Replace(newItems); err != nil {
 			return err
 		}
+		var out models.Invoice
 		if err := tx.Preload(clause.Associations).First(&out, "id = ?", id).Error; err != nil {
 			return err
 		}
@@ -470,7 +499,7 @@ func UpdateInvoice(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(out)
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // GET /api/invoices?type=quotation|invoice|published&limit=50&offset=0
@@ -560,7 +589,7 @@ func ConvertInvoice(c *fiber.Ctx) error {
 }
 
 // PUT /api/invoices/:id/publish
-// Assign number if absent; mark published; snapshot
+// Assign number if absent; mark published; snapshot (no version bump)
 func PublishInvoice(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
@@ -573,9 +602,10 @@ func PublishInvoice(c *fiber.Ctx) error {
 	_ = json.Unmarshal(c.Body(), &payload)
 	if payload.InvoiceNumber != nil {
 		trim := strings.TrimSpace(*payload.InvoiceNumber)
-		payload.InvoiceNumber = &trim
-		if *payload.InvoiceNumber == "" {
+		if trim == "" {
 			payload.InvoiceNumber = nil
+		} else {
+			payload.InvoiceNumber = &trim
 		}
 	}
 
@@ -631,10 +661,12 @@ func GetInvoiceVersions(c *fiber.Ctx) error {
 	if err != nil || id <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid invoice id")
 	}
+
 	db, err := database.GetTenantDB(c)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
+
 	var versions []models.InvoiceVersion
 	if err := db.Where("invoice_id = ?", id).Order("version_no ASC").Find(&versions).Error; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
@@ -643,12 +675,12 @@ func GetInvoiceVersions(c *fiber.Ctx) error {
 }
 
 // POST /api/invoices/:id/payments
-// Body: { "amount":123.45, "method":"bank-transfer", "reference":"...", "note":"...", "paid_at":"2025-08-27T10:00:00Z" }
 func CreatePayment(c *fiber.Ctx) error {
 	id, err := c.ParamsInt("id")
 	if err != nil || id <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid invoice id")
 	}
+
 	var in PaymentCreateDTO
 	if err := middlewares.BindAndValidate(c, &in); err != nil {
 		return err
@@ -690,9 +722,6 @@ func CreatePayment(c *fiber.Ctx) error {
 		if _, err := recalcPaidTotal(tx, uint(id)); err != nil {
 			return err
 		}
-		if err := tx.First(&inv, "id = ?", id).Error; err != nil {
-			return err
-		}
 		return snapshotInvoice(tx, &inv)
 	})
 	if err != nil {
@@ -710,10 +739,12 @@ func ListPayments(c *fiber.Ctx) error {
 	if err != nil || id <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid invoice id")
 	}
+
 	db, err := database.GetTenantDB(c)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
+
 	var payments []models.Payment
 	if err := db.Where("invoice_id = ?", id).Order("paid_at ASC, id ASC").Find(&payments).Error; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")

@@ -17,4 +17,5 @@ type Customer struct {
 	Salutation   string `json:"saluatation" gorm:"not null"`
 	Title        string `json:"title" gorm:"not null"`
 	Active       bool   `json:"-"`
+	Version      uint   `json:"version" gorm:"not null;default:1"`
 }

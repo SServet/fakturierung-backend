@@ -14,6 +14,8 @@ import (
 	"gorm.io/gorm"
 )
 
+// ===== DTOs =====
+
 type SupplierCreateDTO struct {
 	CompanyName  string `json:"company_name" validate:"required,min=1"`
 	Address      string `json:"address" validate:"required,min=1"`
@@ -27,8 +29,9 @@ type SupplierCreateDTO struct {
 	Email        string `json:"email" validate:"omitempty,email"`
 }
 
-// Pointer-based for partial updates (only non-nil fields are updated)
+// Pointer-based partial update; requires optimistic-lock version
 type SupplierUpdateDTO struct {
+	Version      uint    `json:"version" validate:"required,gt=0"`
 	CompanyName  *string `json:"company_name" validate:"omitempty"`
 	Address      *string `json:"address" validate:"omitempty"`
 	City         *string `json:"city" validate:"omitempty"`
@@ -40,6 +43,8 @@ type SupplierUpdateDTO struct {
 	UID          *string `json:"uid" validate:"omitempty"`
 	Email        *string `json:"email" validate:"omitempty,email"`
 }
+
+// ===== Handlers =====
 
 // POST /api/supplier
 func CreateSupplier(c *fiber.Ctx) error {
@@ -102,9 +107,20 @@ func UpdateSupplier(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	// Only non-nil fields get applied
-	if err := db.Model(&models.Supplier{}).Where("id = ?", idStr).Updates(in).Error; err != nil {
+	updates := utils.UpdatesFromPtrDTO(&in, nil)
+	if len(updates) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "no fields to update")
+	}
+	updates["version"] = gorm.Expr("version + 1")
+
+	res := db.Model(&models.Supplier{}).
+		Where("id = ? AND version = ?", idStr, in.Version).
+		Updates(updates)
+	if res.Error != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not update supplier")
+	}
+	if res.RowsAffected == 0 {
+		return fiber.NewError(fiber.StatusConflict, "stale update, please reload")
 	}
 
 	var out models.Supplier

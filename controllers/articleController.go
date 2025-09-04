@@ -12,7 +12,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// ===== DTOs =====
 
 type ArticleDTO struct {
 	Name        string  `json:"name" validate:"required,min=1"`
@@ -21,13 +24,23 @@ type ArticleDTO struct {
 	Active      bool    `json:"active" validate:"required"`
 }
 
-// Pointer-based for partial updates
+// Pointer-based for partial updates; requires optimistic-lock version
 type ArticleUpdateDTO struct {
-	Name        *string  `json:"name" validate:"omitempty,min=0"`
+	Version     uint     `json:"version" validate:"required,gt=0"`
+	Name        *string  `json:"name" validate:"omitempty"`
 	Description *string  `json:"description" validate:"omitempty"`
 	UnitPrice   *float64 `json:"unit_price" validate:"omitempty,gt=0"`
 	Active      *bool    `json:"active" validate:"omitempty"`
 }
+
+func parseIntDefault(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && v >= 0 {
+		return v
+	}
+	return def
+}
+
+// ===== Handlers =====
 
 // POST /api/article  (batch create: accepts JSON array of ArticleDTO)
 func CreateArticles(c *fiber.Ctx) error {
@@ -38,7 +51,6 @@ func CreateArticles(c *fiber.Ctx) error {
 	if len(inputs) == 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "no articles provided")
 	}
-
 	for i := range inputs {
 		if err := middlewares.ValidateStruct(inputs[i]); err != nil {
 			return err
@@ -56,7 +68,7 @@ func CreateArticles(c *fiber.Ctx) error {
 		articles = append(articles, models.Article{
 			Name:        in.Name,
 			Description: in.Description,
-			UnitPrice:   in.UnitPrice, // already rounded in NormalizeDTO
+			UnitPrice:   in.UnitPrice,
 			Active:      in.Active,
 		})
 	}
@@ -85,7 +97,7 @@ func UpdateArticle(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "tenant db unavailable")
 	}
 
-	// Ensure exists
+	// Ensure exists for clean 404
 	var existing models.Article
 	if err := db.First(&existing, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -94,13 +106,24 @@ func UpdateArticle(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "db error")
 	}
 
-	// Only non-nil fields are updated
-	if err := db.Model(&models.Article{}).Where("id = ?", id).Updates(in).Error; err != nil {
+	updates := utils.UpdatesFromPtrDTO(&in, nil)
+	if len(updates) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "no fields to update")
+	}
+	updates["version"] = gorm.Expr("version + 1")
+
+	res := db.Model(&models.Article{}).
+		Where("id = ? AND version = ?", id, in.Version).
+		Updates(updates)
+	if res.Error != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "could not update article")
+	}
+	if res.RowsAffected == 0 {
+		return fiber.NewError(fiber.StatusConflict, "stale update, please reload")
 	}
 
 	var out models.Article
-	if err := db.First(&out, "id = ?", id).Error; err != nil {
+	if err := db.Preload(clause.Associations).First(&out, "id = ?", id).Error; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to reload article")
 	}
 	return c.JSON(out)
@@ -112,8 +135,8 @@ func GetArticles(c *fiber.Ctx) error {
 
 	q := strings.TrimSpace(c.Query("q"))
 	activeStr := strings.TrimSpace(c.Query("active"))
-	limit := parseIntDefault(c.Query("limit"), 50)
-	offset := parseIntDefault(c.Query("offset"), 0)
+	limit := utils.ParseIntDefault(c.Query("limit"), 50)
+	offset := utils.ParseIntDefault(c.Query("offset"), 0)
 
 	db, err := database.GetTenantDB(c)
 	if err != nil {
@@ -138,11 +161,4 @@ func GetArticles(c *fiber.Ctx) error {
 		"articles": articles,
 		"message":  "success",
 	})
-}
-
-func parseIntDefault(s string, def int) int {
-	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && v >= 0 {
-		return v
-	}
-	return def
 }

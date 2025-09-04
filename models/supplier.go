@@ -12,4 +12,5 @@ type Supplier struct {
 	Email        string `json:"email" gorm:"unique;not null"`
 	PhoneNumber  string `json:"phone_number" gorm:"not null"`
 	MobileNumber string `json:"mobile_number" gorm:"not null"`
+	Version      uint   `json:"version" gorm:"not null;default:1"`
 }
